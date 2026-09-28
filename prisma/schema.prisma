@@ -1,0 +1,149 @@
+generator client {
+  provider = "prisma-client-js"
+   output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum IncidentStatus {
+  OPEN
+  INVESTIGATING
+  MONITORING
+  RESOLVED
+}
+
+enum IncidentPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model User {
+  id                String       @id @default(uuid()) @db.Uuid
+  email             String       @unique
+  name              String
+  passwordHash      String
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  memberships       Membership[]
+  createdWorkspaces Workspace[]  @relation("WorkspaceCreator")
+  createdIncidents  Incident[]   @relation("IncidentCreator")
+  assignedIncidents Incident[]   @relation("IncidentAssignee")
+  comments          Comment[]
+  auditEvents       AuditEvent[]
+}
+
+model Workspace {
+  id                 String       @id @default(uuid()) @db.Uuid
+  name               String
+  slug               String       @unique
+  nextIncidentNumber Int          @default(1)
+  createdById        String       @db.Uuid
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  createdBy          User         @relation("WorkspaceCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  memberships        Membership[]
+  incidents          Incident[]
+  labels             Label[]
+  auditEvents        AuditEvent[]
+}
+
+model Membership {
+  workspaceId String        @db.Uuid
+  userId      String        @db.Uuid
+  role        WorkspaceRole @default(MEMBER)
+  joinedAt    DateTime      @default(now())
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, userId])
+  @@index([userId])
+}
+
+model Incident {
+  id          String           @id @default(uuid()) @db.Uuid
+  number      Int
+  title       String
+  description String
+  status      IncidentStatus   @default(OPEN)
+  priority    IncidentPriority @default(MEDIUM)
+  workspaceId String           @db.Uuid
+  createdById String           @db.Uuid
+  assigneeId  String?          @db.Uuid
+  dueAt       DateTime?
+  resolvedAt  DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy   User             @relation("IncidentCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  assignee    User?            @relation("IncidentAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  comments    Comment[]
+  labels      IncidentLabel[]
+
+  @@unique([workspaceId, number])
+  @@index([workspaceId, status, priority])
+  @@index([assigneeId])
+  @@index([createdAt])
+}
+
+model Comment {
+  id         String   @id @default(uuid()) @db.Uuid
+  body       String
+  incidentId String   @db.Uuid
+  authorId   String   @db.Uuid
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  author     User     @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([incidentId, createdAt])
+  @@unique([incidentId,id])
+}
+
+model Label {
+  id          String          @id @default(uuid()) @db.Uuid
+  name        String
+  color       String
+  workspaceId String          @db.Uuid
+  createdAt   DateTime        @default(now())
+  workspace   Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  incidents   IncidentLabel[]
+
+  @@unique([workspaceId, name])
+}
+
+model IncidentLabel {
+  incidentId String   @db.Uuid
+  labelId    String   @db.Uuid
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  label      Label    @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([incidentId, labelId])
+  @@index([labelId])
+}
+
+model AuditEvent {
+  id          String    @id @default(uuid()) @db.Uuid
+  action      String
+  entityType  String
+  entityId    String
+  metadata    Json?
+  workspaceId String    @db.Uuid
+  actorId     String?   @db.Uuid
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  actor       User?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([entityType, entityId])
+}
