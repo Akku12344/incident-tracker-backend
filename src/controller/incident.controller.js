@@ -3,24 +3,25 @@ import { prisma } from "../config/db.js";
 
 export const createIncidentSchema = z.object({
   body: z.object({
-    number: z.number().min(1),
-    title: z.string().min(1),
-    description: z.string().min(1),
+    title: z.string().trim().min(1).max(200),
+    description: z.string().trim().min(1).max(10000),
   }),
 
   params: z.object({
-    workspaceId: z.string().min(1),
+    workspaceId: z.uuid(),
   }),
 });
 
 export const updateIncidentSchema = z.object({
-  status: z.enum(["OPEN", "INVESTIGATING", "RESOLVED"]).optional(),
+  status: z.enum(["OPEN", "INVESTIGATING", "RESOLVED", "MONITORING"]).optional(),
   priority: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).optional(),
-  assigneeId: z.string().optional(),
+  assigneeId: z.uuid().optional(),
+}).refine((value) => Object.keys(value).length > 0, {
+  message: "Provide at least one field to update",
 });
 
 export const commentSchema = z.object({
-  body: z.string(),
+  body: z.string().trim().min(1).max(5000),
 });
 
 async function asigneeValidation(id, workspaceId) {
@@ -35,20 +36,25 @@ async function asigneeValidation(id, workspaceId) {
     throw new Error("user not a member of workspace");
   }
 
-  return true;
+  return id;
 }
 
 export const createIncident = async (req, res, next) => {
   try {
-    const validatedData = createIncidentSchema.parse(req.body);
-    const { number, title, description } = validatedData;
+    const { title, description } = req.body;
     const { workspaceId } = req.params;
     const { user } = req;
 
     const result = await prisma.$transaction(async (tx) => {
+      const workspace = await tx.workspace.update({
+        where: { id: workspaceId },
+        data: { nextIncidentNumber: { increment: 1 } },
+        select: { nextIncidentNumber: true },
+      });
+
       const incident = await tx.incident.create({
         data: {
-          number,
+          number: workspace.nextIncidentNumber - 1,
           title,
           description,
           workspaceId,
@@ -62,6 +68,7 @@ export const createIncident = async (req, res, next) => {
           entityType: "incident",
           entityId: incident.id,
           actorId: user.id,
+          workspaceId,
           metadata: {
             name: incident.title,
           },
@@ -176,19 +183,35 @@ export const updateIncidentbyId = async (req, res, next) => {
       throw new Error("incident not found");
     }
 
-    const currentStatus = incidentExist.status;
-    let newStatus;
-    if (
-      (currentStatus == "OPEN" && status == "INVESTIGATING") ||
-      (currentStatus == "INVESTIGATING" && status == "MONITORING") ||
-      (currentStatus == "MONITORING" && status == "RESOLVED") ||
-      (currentStatus == "RESOLVED" && status == "OPEN")
-    ) {
-      newStatus = status;
-    } else {
-      throw new Error(
-        `no you have done this ${currentStatus} after this ${status}`,
-      );
+    const updateData = {};
+
+    if (status !== undefined) {
+      const currentStatus = incidentExist.status;
+      const isValidTransition =
+        (currentStatus === "OPEN" && status === "INVESTIGATING") ||
+        (currentStatus === "INVESTIGATING" && status === "MONITORING") ||
+        (currentStatus === "MONITORING" && status === "RESOLVED") ||
+        (currentStatus === "RESOLVED" && status === "OPEN");
+
+      if (!isValidTransition) {
+        throw new Error(
+          `Cannot transition an incident from ${currentStatus} to ${status}`,
+        );
+      }
+
+      updateData.status = status;
+    }
+
+    if (priority !== undefined) {
+      updateData.priority = priority;
+    }
+
+    if (assigneeId !== undefined) {
+      updateData.assigneeId = await asigneeValidation(assigneeId, workspaceId);
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      throw new Error("Provide at least one field to update");
     }
 
     const result = await prisma.$transaction(async (tx) => {
@@ -196,11 +219,7 @@ export const updateIncidentbyId = async (req, res, next) => {
         where: {
           id: incidentId,
         },
-        data: {
-          status: newStatus,
-          priority: priority,
-          assigneeId: asigneeValidation(assigneeId, workspaceId),
-        },
+        data: updateData,
       });
 
       await tx.auditEvent.create({
@@ -209,6 +228,7 @@ export const updateIncidentbyId = async (req, res, next) => {
           entityType: "incident",
           entityId: incidentId,
           actorId: user.id,
+          workspaceId,
           metadata: {
             name: incident.title,
             assignee: assigneeId,
@@ -258,6 +278,7 @@ export const deleteIncident = async (req, res, next) => {
           action: "incident.deleted",
           entityType: "incident",
           entityId: incidentId,
+          workspaceId,
           actorId: user.id,
           metadata: {
             name: incident.title,
@@ -278,7 +299,7 @@ export const deleteIncident = async (req, res, next) => {
 
 export const createComment = async (req, res, next) => {
   try {
-    const validateData = commentSchema(req.body);
+    const validateData = commentSchema.parse(req.body);
     const { body } = validateData;
     const { workspaceId, incidentId } = req.params;
     const { user } = req;
@@ -346,9 +367,6 @@ export const getComment = async (req, res, next) => {
       },
       orderBy: {
         createdAt: "desc",
-      },
-      include: {
-        author: true,
       },
     });
 

@@ -1,5 +1,25 @@
 import slugify from "slugify";
-import { prisma } from "../config/db";
+import { prisma } from "../config/db.js";
+import { z } from "zod";
+
+const workspaceRoleSchema = z.enum(["OWNER", "ADMIN", "MEMBER", "VIEWER"]);
+
+export const createWorkspaceSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+});
+
+export const addMemberSchema = z.object({
+  email: z
+    .string()
+    .trim()
+    .email()
+    .max(320)
+    .transform((email) => email.toLowerCase()),
+});
+
+export const changeRoleSchema = z.object({
+  role: workspaceRoleSchema,
+});
 
 export const createWorkspace = async (req, res, next) => {
   try {
@@ -45,6 +65,7 @@ export const createWorkspace = async (req, res, next) => {
           },
         },
       });
+      return workspace;
     });
     return res.status(201).json({
       success: true,
@@ -205,24 +226,28 @@ export const removeMember = async (req, res, next) => {
       throw new Error("worksapce not found");
     }
 
-    const membership = await prisma.membership.findUnique({
-      where: {
-        userId_workspaceId: {
-          userId: userId,
-          workspaceId,
-        },
-      },
-      include: {
-        user: true,
-      },
-    });
-
-    if (!membership) {
-      throw new Error("Member not found in workspace");
-    }
-
     await prisma.$transaction(async (tx) => {
-      const removemember = await tx.membership.delete({
+      const membership = await tx.membership.findUnique({
+        where: {
+          workspaceId_userId: { workspaceId, userId },
+        },
+      });
+
+      if (!membership) {
+        throw new Error("Member not found in workspace");
+      }
+
+      if (membership.role === "OWNER") {
+        const ownerCount = await tx.membership.count({
+          where: { workspaceId, role: "OWNER" },
+        });
+
+        if (ownerCount <= 1) {
+          throw new Error("Cannot remove the last owner of a workspace");
+        }
+      }
+
+      await tx.membership.delete({
         where: {
           workspaceId_userId: {
             workspaceId,
@@ -258,6 +283,7 @@ export const changeRole = async (req, res, next) => {
   try {
     const { userId, workspaceId } = req.params;
     const { user } = req;
+    const { role } = req.body;
 
     const existWorkspace = await prisma.workspace.findUnique({
       where: {
@@ -269,24 +295,31 @@ export const changeRole = async (req, res, next) => {
       throw new Error("workspace not existed");
     }
 
-    const membership = await prisma.membership.findUnique({
-      where: {
-        workspaceId_userId: {
-          userId: userId,
-          workspaceId,
-        },
-      },
-    });
-
-    const previousRole = membership.role;
-
-    if (!membership) {
-      throw new Error(
-        `user with ${userId} not a member of workspace with ${workspaceId}`,
-      );
-    }
-
     const result = await prisma.$transaction(async (tx) => {
+      const membership = await tx.membership.findUnique({
+        where: {
+          workspaceId_userId: { workspaceId, userId },
+        },
+      });
+
+      if (!membership) {
+        throw new Error(
+          `user with ${userId} not a member of workspace with ${workspaceId}`,
+        );
+      }
+
+      const previousRole = membership.role;
+
+      if (previousRole === "OWNER" && role !== "OWNER") {
+        const ownerCount = await tx.membership.count({
+          where: { workspaceId, role: "OWNER" },
+        });
+
+        if (ownerCount <= 1) {
+          throw new Error("Cannot demote the last owner of a workspace");
+        }
+      }
+
       const updatedMember = await tx.membership.update({
         where: {
           workspaceId_userId: {
@@ -295,7 +328,7 @@ export const changeRole = async (req, res, next) => {
           },
         },
         data: {
-          role: "ADMIN",
+          role,
         },
       });
 
@@ -334,9 +367,6 @@ export const members = async (req, res, next) => {
     const existWorkspace = await prisma.workspace.findUnique({
       where: {
         id: workspaceId,
-      },
-      include: {
-        user: true,
       },
     });
 

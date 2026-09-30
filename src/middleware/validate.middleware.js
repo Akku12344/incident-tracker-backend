@@ -1,14 +1,18 @@
-export const validate = (schema) => {
+export const validateBody = (schema) => {
   return (req, res, next) => {
     try {
-      const result = schema.parse({
-        body: req.body,
-        params: req.params,
-      });
+      req.body = schema.parse(req.body);
+      next();
+    } catch (error) {
+      next(error);
+    }
+  };
+};
 
-      req.body = result.body;
-      req.params = result.params;
-
+export const validateParams = (schema) => {
+  return (req, res, next) => {
+    try {
+      req.params = schema.parse(req.params);
       next();
     } catch (error) {
       next(error);
